@@ -1,0 +1,97 @@
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password123
+      - MINIO_REGION=us-east-1
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - iceberg-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      retries: 5
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set minio http://minio:9000 admin password123;
+      mc mb minio/warehouse;
+      mc policy set public minio/warehouse;
+      echo 'MinIO setup complete';
+      "
+    networks:
+      - iceberg-net
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=iceberg
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - iceberg-net
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: iceberg-rest
+    depends_on:
+      - postgres
+      - minio
+    ports:
+      - "8181:8181"
+    environment:
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_ACCESS__KEY__ID=admin
+      - CATALOG_S3_SECRET__ACCESS__KEY=password123
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+      - CATALOG_JDBC__URL=jdbc:postgresql://postgres:5432/iceberg
+      - CATALOG_JDBC__USER=admin
+      - CATALOG_JDBC__PASSWORD=password123
+      - CATALOG_JDBC__DRIVER=org.postgresql.Driver
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password123
+    networks:
+      - iceberg-net
+
+  trino:
+    image: trinodb/trino:476
+    container_name: trino
+    depends_on:
+      - iceberg-rest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/config:/etc/trino
+      - ./trino/catalog:/etc/trino/catalog
+    networks:
+      - iceberg-net
+
+volumes:
+  minio-data:
+  postgres-data:
+
+networks:
+  iceberg-net:
+    driver: bridge
